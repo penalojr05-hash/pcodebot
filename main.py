@@ -24,23 +24,22 @@ WELCOME_CHANNEL = 1514684270596198594
 SUPPORT_CHANNEL = 1514684277764128800
 GITHUB_CHANNEL = 1514684267811180808
 BOT_LOG_CHANNEL = 1514684302502268929
-MOD_LOG_CHANNEL = 1514684302502268929  # Same as bot log or change to your mod log channel
+MOD_LOG_CHANNEL = 1514684302502268929
 
-# Role IDs - Hierarchy: Owner > Executive Team > Administration Team > Members
-OWNERSHIP_ROLE = 1517219295623516370  # Owner/Founder role
-EXECUTIVE_ROLE = 1517219295623516370  # Executive Team
-ADMIN_ROLE = 1517237018642481252      # Administration Team
+# Role IDs
+OWNERSHIP_ROLE = 1517219295623516370
+EXECUTIVE_ROLE = 1517219295623516370
+ADMIN_ROLE = 1517237018642481252
 LEADERSHIP_ROLE_1 = 1517219295623516370
 LEADERSHIP_ROLE_2 = 1517222332991668425
 
 # Raid protection settings
-RAID_THRESHOLD = 5  # Join events in 10 seconds = raid
-RAID_TIME_WINDOW = 10  # seconds
-BAN_ON_RAID = True  # Auto-ban on raid detection
+RAID_THRESHOLD = 5
+RAID_TIME_WINDOW = 10
+BAN_ON_RAID = True
 
-# In-memory tracking for raid detection
+# In-memory tracking
 join_tracker = defaultdict(list)
-warning_tracker = defaultdict(int)
 mute_tracker = {}
 
 # Database setup
@@ -48,41 +47,33 @@ def init_db():
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     
-    # Bot logs table
     c.execute('''CREATE TABLE IF NOT EXISTS bot_logs
                  (id INTEGER PRIMARY KEY, user_id TEXT, bot_name TEXT, service TEXT, 
                   github_link TEXT, status TEXT, created_at TIMESTAMP, last_check TIMESTAMP)''')
     
-    # Bot hosting table
     c.execute('''CREATE TABLE IF NOT EXISTS bot_hosting
                  (id INTEGER PRIMARY KEY, user_id TEXT, bot_name TEXT, bot_token TEXT,
                   status TEXT, uptime REAL, created_at TIMESTAMP, last_check TIMESTAMP, last_alert TIMESTAMP)''')
     
-    # Economy table
     c.execute('''CREATE TABLE IF NOT EXISTS economy
                  (user_id TEXT PRIMARY KEY, balance REAL, level INTEGER, xp REAL, last_daily TIMESTAMP,
                   total_earned REAL, achievements TEXT, streak INTEGER, last_streak_date TIMESTAMP)''')
     
-    # Support tickets table
     c.execute('''CREATE TABLE IF NOT EXISTS support_tickets
                  (id INTEGER PRIMARY KEY, user_id TEXT, claimed_by TEXT, service TEXT, channel_id TEXT, 
                   status TEXT, created_at TIMESTAMP, closed_at TIMESTAMP, close_reason TEXT, rating INTEGER)''')
     
-    # Ticket messages for tracking
     c.execute('''CREATE TABLE IF NOT EXISTS ticket_messages
                  (id INTEGER PRIMARY KEY, ticket_id INTEGER, message_id TEXT, channel_id TEXT)''')
     
-    # Moderation table - User infractions
     c.execute('''CREATE TABLE IF NOT EXISTS moderation
                  (id INTEGER PRIMARY KEY, user_id TEXT, action TEXT, reason TEXT, 
                   moderator_id TEXT, created_at TIMESTAMP, expires_at TIMESTAMP, 
                   is_active INTEGER DEFAULT 1)''')
     
-    # Warning table
     c.execute('''CREATE TABLE IF NOT EXISTS warnings
                  (id INTEGER PRIMARY KEY, user_id TEXT, reason TEXT, moderator_id TEXT, created_at TIMESTAMP)''')
     
-    # Raid log table
     c.execute('''CREATE TABLE IF NOT EXISTS raid_logs
                  (id INTEGER PRIMARY KEY, user_id TEXT, action TEXT, reason TEXT, created_at TIMESTAMP)''')
     
@@ -100,35 +91,30 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(e)
-    
-    # Start background tasks
-    raid_monitor.start()
 
 @bot.event
 async def on_member_join(member):
-    """Send welcome message when member joins - WITH RAID DETECTION"""
-    # Raid detection
+    """Send welcome message when member joins"""
     current_time = datetime.now()
     guild_id = str(member.guild.id)
     
-    # Add this join to tracker
+    # Raid detection
     join_tracker[guild_id].append(current_time)
-    
-    # Remove old entries outside the time window
     join_tracker[guild_id] = [t for t in join_tracker[guild_id] 
                               if (current_time - t).total_seconds() < RAID_TIME_WINDOW]
     
-    # Check for raid
     if len(join_tracker[guild_id]) >= RAID_THRESHOLD:
         await handle_raid(member.guild, member)
         return
     
     # Normal welcome message
     channel = bot.get_channel(WELCOME_CHANNEL)
+    if not channel:
+        return
     
     embed = discord.Embed(
         title="🚀 Welcome to P Code Studio!",
-        description=f"We're excited to have you join our growing community of developers, designers, creators, and innovators.",
+        description="We're excited to have you join our growing community of developers, designers, creators, and innovators.",
         color=0x028DEF
     )
     
@@ -144,17 +130,11 @@ async def on_member_join(member):
         inline=False
     )
     
-    embed.add_field(
-        name="Get Started:",
-        value="Whether you're here to request services, learn new skills, join our team, or simply connect with others, we're happy to have you with us.",
-        inline=False
-    )
-    
     embed.set_footer(text="✨ Code. Design. Create.\n👑 Founded by itss_Gre1mi")
     
     await channel.send(f"🚀 Welcome to P Code Studio, {member.mention}!", embed=embed)
     
-    # Initialize economy balance
+    # Initialize economy
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     c.execute("""INSERT OR IGNORE INTO economy 
@@ -165,24 +145,23 @@ async def on_member_join(member):
     conn.close()
 
 async def handle_raid(guild, member):
-    """Handle raid detection and auto-ban"""
+    """Handle raid detection"""
     raid_channel = bot.get_channel(MOD_LOG_CHANNEL)
+    if not raid_channel:
+        return
     
     embed = discord.Embed(
         title="🚨 RAID DETECTED",
-        description=f"Multiple accounts joining rapidly detected!",
+        description="Multiple accounts joining rapidly detected!",
         color=0xFF0000
     )
     embed.add_field(name="Latest Joiner", value=f"{member.mention} ({member.id})", inline=False)
     embed.add_field(name="Account Age", value=f"Created <t:{int(member.created_at.timestamp())}:R>", inline=False)
     
-    # Log to database
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     c.execute("INSERT INTO raid_logs (user_id, action, reason, created_at) VALUES (?, ?, ?, ?)",
               (str(member.id), "RAID_DETECTED", "Raid event triggered", datetime.now()))
-    conn.commit()
-    conn.close()
     
     if BAN_ON_RAID:
         try:
@@ -193,46 +172,31 @@ async def handle_raid(guild, member):
         except:
             embed.add_field(name="Action Taken", value="⚠️ Could not ban user", inline=False)
     
-    embed.set_footer(text=f"Guild: {guild.name} | {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+    conn.commit()
+    conn.close()
+    
+    embed.set_footer(text=f"Guild: {guild.name}")
     await raid_channel.send(embed=embed)
 
 @bot.event
 async def on_member_remove(member):
-    """Send goodbye message when member leaves"""
+    """Send goodbye message"""
     channel = bot.get_channel(WELCOME_CHANNEL)
+    if not channel:
+        return
     
     embed = discord.Embed(
         title="📤 Farewell",
-        description=f"{member.name} has left P Code Studio.\n\nThank you for being part of our community. We appreciate the time you spent with us and wish you success in all your future projects and endeavors.\n\nOur doors will always remain open should you decide to return.",
+        description=f"{member.name} has left P Code Studio.",
         color=0x028DEF
     )
-    
-    embed.set_footer(text="✨ Code. Design. Create.\n👑 P Code Studio Team")
+    embed.set_footer(text="✨ Code. Design. Create.")
     
     await channel.send(embed=embed)
 
-@tasks.loop(seconds=30)
-async def raid_monitor():
-    """Background task to monitor raids and expiring mutes"""
-    # Clean old join entries
-    current_time = datetime.now()
-    for guild_id in list(join_tracker.keys()):
-        join_tracker[guild_id] = [t for t in join_tracker[guild_id] 
-                                  if (current_time - t).total_seconds() < RAID_TIME_WINDOW]
-    
-    # Check for expired mutes
-    expired_mutes = []
-    for user_id, unmute_time in mute_tracker.items():
-        if datetime.now() >= unmute_time:
-            expired_mutes.append(user_id)
-    
-    # This would require access to guild/member objects to actually unmute
-    # For now, we just track it - implement per-guild basis
-
-# ==================== SUPPORT PANEL COMMANDS ====================
+# ==================== SUPPORT PANEL ====================
 
 class CloseTicketModal(discord.ui.Modal):
-    """Modal for closing tickets with a reason"""
     def __init__(self, ticket_id):
         super().__init__(title="Close Support Ticket")
         self.ticket_id = ticket_id
@@ -241,7 +205,6 @@ class CloseTicketModal(discord.ui.Modal):
             label="Close Reason",
             placeholder="Why are you closing this ticket?",
             required=False,
-            min_length=0,
             max_length=500,
             style=discord.TextStyle.paragraph
         )
@@ -257,11 +220,7 @@ class CloseTicketModal(discord.ui.Modal):
                      WHERE id = ?""",
                   ("closed", datetime.now(), reason, self.ticket_id))
         conn.commit()
-        conn.close()
         
-        # Get ticket info
-        conn = sqlite3.connect('pcodebot.db')
-        c = conn.cursor()
         c.execute("SELECT user_id, channel_id FROM support_tickets WHERE id = ?", (self.ticket_id,))
         ticket = c.fetchone()
         conn.close()
@@ -274,23 +233,21 @@ class CloseTicketModal(discord.ui.Modal):
                     description=f"**Closed By:** {interaction.user.mention}\n**Reason:** {reason}",
                     color=0xFF0000
                 )
-                embed.set_footer(text="© P Code Studio | This channel will be archived soon")
                 await channel.send(embed=embed)
         
-        await interaction.response.send_message("✅ Ticket closed successfully!", ephemeral=True)
+        await interaction.response.send_message("✅ Ticket closed!", ephemeral=True)
 
 class TicketButtonView(discord.ui.View):
-    """View for ticket management buttons"""
     def __init__(self, ticket_id, user_id):
         super().__init__(timeout=None)
         self.ticket_id = ticket_id
         self.user_id = user_id
     
-    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.green, emoji="👋")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.green, emoji="👋")
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
-            await interaction.response.send_message("❌ You don't have permission to claim tickets.", ephemeral=True)
+            await interaction.response.send_message("❌ No permission", ephemeral=True)
             return
         
         conn = sqlite3.connect('pcodebot.db')
@@ -299,7 +256,7 @@ class TicketButtonView(discord.ui.View):
         result = c.fetchone()
         
         if result and result[0]:
-            await interaction.response.send_message("❌ This ticket is already claimed!", ephemeral=True)
+            await interaction.response.send_message("❌ Already claimed!", ephemeral=True)
             conn.close()
             return
         
@@ -308,58 +265,30 @@ class TicketButtonView(discord.ui.View):
         conn.commit()
         conn.close()
         
-        embed = discord.Embed(
-            title="✅ Ticket Claimed",
-            description=f"**Claimed By:** {interaction.user.mention}",
-            color=0x00FF00
-        )
+        embed = discord.Embed(title="✅ Claimed", description=f"By {interaction.user.mention}", color=0x00FF00)
         await interaction.response.send_message(embed=embed)
-        
-        user = await bot.fetch_user(int(self.user_id))
-        await user.send(f"📌 Your support ticket has been claimed by {interaction.user.mention}!")
     
-    @discord.ui.button(label="Unclaim Ticket", style=discord.ButtonStyle.secondary, emoji="🔄")
+    @discord.ui.button(label="Unclaim", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def unclaim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
-            await interaction.response.send_message("❌ You don't have permission to unclaim tickets.", ephemeral=True)
+            await interaction.response.send_message("❌ No permission", ephemeral=True)
             return
         
         conn = sqlite3.connect('pcodebot.db')
         c = conn.cursor()
-        c.execute("SELECT claimed_by FROM support_tickets WHERE id = ?", (self.ticket_id,))
-        result = c.fetchone()
-        
-        if not result or not result[0]:
-            await interaction.response.send_message("❌ This ticket is not claimed!", ephemeral=True)
-            conn.close()
-            return
-        
         c.execute("UPDATE support_tickets SET claimed_by = NULL WHERE id = ?", (self.ticket_id,))
         conn.commit()
         conn.close()
         
-        embed = discord.Embed(
-            title="🔄 Ticket Unclaimed",
-            description=f"**Unclaimed By:** {interaction.user.mention}",
-            color=0xFFFF00
-        )
+        embed = discord.Embed(title="🔄 Unclaimed", color=0xFFFF00)
         await interaction.response.send_message(embed=embed)
     
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, emoji="🔒")
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.red, emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
-            await interaction.response.send_message("❌ You don't have permission to close tickets.", ephemeral=True)
-            return
-        
-        await interaction.response.send_modal(CloseTicketModal(self.ticket_id))
-    
-    @discord.ui.button(label="Close With Reason", style=discord.ButtonStyle.danger, emoji="📝")
-    async def close_with_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_roles = [role.id for role in interaction.user.roles]
-        if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
-            await interaction.response.send_message("❌ You don't have permission to close tickets.", ephemeral=True)
+            await interaction.response.send_message("❌ No permission", ephemeral=True)
             return
         
         await interaction.response.send_modal(CloseTicketModal(self.ticket_id))
@@ -367,62 +296,30 @@ class TicketButtonView(discord.ui.View):
 class ServiceSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="👑 Leadership Support", value="leadership", description="Connect with our executive team for partnerships and leadership inquiries"),
-            discord.SelectOption(label="🤖 Discord Bot Development", value="bot_dev", description="Get help designing and developing custom Discord bots"),
-            discord.SelectOption(label="🎮 Roblox Game Development", value="roblox", description="Expert assistance with Roblox game creation and scripting"),
-            discord.SelectOption(label="🎨 Graphic & UI Design", value="design", description="Professional graphic and user interface design services"),
-            discord.SelectOption(label="🛠️ Discord Server Design", value="server_design", description="Complete Discord server setup and professional organization"),
-            discord.SelectOption(label="💡 Custom Development", value="custom", description="Unique projects that don't fit standard categories"),
-            discord.SelectOption(label="🧑‍🏫 Learning & Training", value="training", description="Learn skills from experienced team members"),
-            discord.SelectOption(label="💬 General Support", value="general", description="General questions and support for P Code Studio"),
+            discord.SelectOption(label="👑 Leadership Support", value="leadership"),
+            discord.SelectOption(label="🤖 Bot Development", value="bot_dev"),
+            discord.SelectOption(label="🎮 Roblox Development", value="roblox"),
+            discord.SelectOption(label="🎨 Graphic & UI Design", value="design"),
+            discord.SelectOption(label="🛠️ Server Design", value="server_design"),
+            discord.SelectOption(label="💡 Custom Solutions", value="custom"),
+            discord.SelectOption(label="🧑‍🏫 Training", value="training"),
+            discord.SelectOption(label="💬 General Support", value="general"),
         ]
-        super().__init__(placeholder="Select a service...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Select a service...", options=options)
     
     async def callback(self, interaction: discord.Interaction):
         service = self.values[0]
         user = interaction.user
         
         services = {
-            "leadership": {
-                "name": "👑 Leadership Support",
-                "roles": [LEADERSHIP_ROLE_1, LEADERSHIP_ROLE_2],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for contacting P Code Studio Leadership Support. A member of our Executive Team will be with you shortly. ⏳\n\nPlease explain your concern, partnership request, business inquiry, or leadership-related matter below.\n\n✨ Thank you for choosing P Code Studio."
-            },
-            "bot_dev": {
-                "name": "🤖 Discord Bot Development",
-                "roles": [1517239326704930837, 1517237815421964470, 1517238791771783409],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for choosing P Code Studio Bot Development Services.\n\nA Discord Bot Developer will be with you shortly. 🚀\n\nPlease provide:\n\n📝 Bot Description:\n⚙️ Features Needed:\n💰 Budget (Optional):\n⏰ Deadline (Optional):\n📎 Examples or References:\n\nWe look forward to bringing your bot idea to life!"
-            },
-            "roblox": {
-                "name": "🎮 Roblox Game Development",
-                "roles": [1517240614163447819, 1517240911309050049, 1517239644989685911],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for contacting P Code Studio Roblox Development Services.\n\nA Roblox Developer will assist you shortly. 🚀\n\nPlease provide:\n\n🎮 Project Description\n📝 Systems Needed\n💰 Budget (Optional)\n⏰ Deadline (Optional)\n📎 References or Examples\n\nThank you for choosing P Code Studio."
-            },
-            "design": {
-                "name": "🎨 Graphic & UI Design",
-                "roles": [1517241987986620486],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for choosing P Code Studio Design Services.\n\nA Designer will assist you shortly. 🎨\n\nPlease provide:\n\n🖼️ Design Type\n🎨 Color Preferences\n📎 References\n💰 Budget (Optional)\n⏰ Deadline (Optional)\n\nWe can't wait to bring your vision to life."
-            },
-            "server_design": {
-                "name": "🛠️ Discord Server Design & Setup",
-                "roles": [1517306660589273209],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for choosing P Code Studio Server Design Services.\n\nA Server Designer will assist you shortly. 🚀\n\nPlease provide:\n\n📖 Server Purpose\n👥 Estimated Member Count\n⚙️ Systems Needed\n📎 References\n💰 Budget (Optional)\n\nWe'll help make your server professional and organized."
-            },
-            "custom": {
-                "name": "💡 Custom Development Solutions",
-                "roles": [1517310391473148045],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for contacting P Code Studio Custom Development Solutions.\n\nNeed something unique that doesn't fit into one of our standard service categories? You've come to the right place! 🚀\n\nWhether it's a custom system, automation, integration, special project, or a completely unique idea, our team will review your request and help bring it to life.\n\n📋 Please Provide:\n📝 Detailed Project Description\n🎯 Project Goals\n⚙️ Required Features\n📎 References, Screenshots, or Examples\n💰 Budget (Optional)\n⏰ Deadline (Optional)\n💡 Any Additional Information"
-            },
-            "training": {
-                "name": "🧑‍🏫 Learning & Training Services",
-                "roles": [1517237018642481252],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for contacting P Code Studio Training Services.\n\nInterested in learning one of our services? Let us know which skill you'd like to learn and we'll connect you with an experienced team member who can help guide and teach you.\n\n🎓 What would you like to learn?"
-            },
-            "general": {
-                "name": "💬 General Support",
-                "roles": [1517237018642481252],
-                "message": f"Welcome {user.mention}! 👋\n\nThank you for contacting P Code Studio Support.\n\nA staff member will assist you shortly. ⏳\n\nPlease describe how we can help you today.\n\nThank you for being part of the P Code Studio community!"
-            }
+            "leadership": {"name": "👑 Leadership Support", "roles": [LEADERSHIP_ROLE_1, LEADERSHIP_ROLE_2]},
+            "bot_dev": {"name": "🤖 Bot Development", "roles": [1517239326704930837, 1517237815421964470, 1517238791771783409]},
+            "roblox": {"name": "🎮 Roblox", "roles": [1517240614163447819, 1517240911309050049, 1517239644989685911]},
+            "design": {"name": "🎨 Design", "roles": [1517241987986620486]},
+            "server_design": {"name": "🛠️ Server Design", "roles": [1517306660589273209]},
+            "custom": {"name": "💡 Custom", "roles": [1517310391473148045]},
+            "training": {"name": "🧑‍🏫 Training", "roles": [1517237018642481252]},
+            "general": {"name": "💬 General", "roles": [1517237018642481252]},
         }
         
         service_info = services[service]
@@ -430,7 +327,6 @@ class ServiceSelect(discord.ui.Select):
         guild = interaction.guild
         channel = await guild.create_text_channel(
             name=f"ticket-{user.name}",
-            category=None,
             overwrites={
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
@@ -449,51 +345,34 @@ class ServiceSelect(discord.ui.Select):
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   (str(user.id), None, service, str(channel.id), "open", datetime.now(), None, None, 0))
         conn.commit()
-        
         ticket_id = c.lastrowid
         conn.close()
         
-        embed = discord.Embed(
-            title=f"New {service_info['name']} Ticket",
-            description=service_info["message"],
-            color=0x028DEF
-        )
-        embed.add_field(
-            name="📋 Ticket Info",
-            value=f"**Ticket ID:** {ticket_id}\n**Status:** Open\n**Created At:** <t:{int(datetime.now().timestamp())}:f>",
-            inline=False
-        )
+        embed = discord.Embed(title=f"New {service_info['name']} Ticket", color=0x028DEF)
+        embed.add_field(name="Ticket ID", value=str(ticket_id), inline=False)
+        embed.add_field(name="User", value=user.mention, inline=False)
         embed.set_footer(text="© P Code Studio | All Rights Reserved")
         
         mention_text = " ".join([f"<@&{role_id}>" for role_id in service_info["roles"]])
+        await channel.send(mention_text, embed=embed, view=TicketButtonView(ticket_id, str(user.id)))
         
-        message = await channel.send(mention_text, embed=embed, view=TicketButtonView(ticket_id, str(user.id)))
-        
-        conn = sqlite3.connect('pcodebot.db')
-        c = conn.cursor()
-        c.execute("INSERT INTO ticket_messages (ticket_id, message_id, channel_id) VALUES (?, ?, ?)",
-                  (ticket_id, str(message.id), str(channel.id)))
-        conn.commit()
-        conn.close()
-        
-        await interaction.response.send_message(f"✅ Support ticket created! Check {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Ticket created! {channel.mention}", ephemeral=True)
 
 class ServiceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(ServiceSelect())
 
-@bot.tree.command(name="assistance", description="Get support from P Code Studio")
-@discord.app_commands.describe(panel="Open the support panel")
-async def assistance_panel(interaction: discord.Interaction, panel: str = "panel"):
+@bot.tree.command(name="assistance", description="Open support panel")
+async def assistance_panel(interaction: discord.Interaction):
     user_roles = [role.id for role in interaction.user.roles]
     if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     embed = discord.Embed(
         title="P Code Studio - Support Panel",
-        description="Welcome to P Code Studio support! We offer a wide range of professional services to help bring your ideas to life. Whether you need Discord bot development, Roblox game creation, graphic design, server setup, or custom solutions, our experienced team is here to assist you. Select a service below to get started with a support ticket.",
+        description="Select a service below to create a support ticket.",
         color=0x028DEF
     )
     
@@ -503,24 +382,13 @@ async def assistance_panel(interaction: discord.Interaction, panel: str = "panel
         inline=False
     )
     
-    embed.add_field(
-        name="Our Services",
-        value="🤖 **Discord Bot Development** - Custom Discord bots tailored to your needs\n🎮 **Roblox Development** - Professional game development and scripting\n🎨 **Graphic & UI Design** - Creative design solutions\n🛠️ **Server Design** - Professional Discord server setup\n💡 **Custom Solutions** - Unique projects for your specific needs\n🧑‍🏫 **Training** - Learn from our experienced team members",
-        inline=False
-    )
-    
     embed.set_footer(text="© P Code Studio | All Rights Reserved")
     
     await interaction.response.send_message(embed=embed, view=ServiceView())
 
-# ==================== MODERATION COMMANDS ====================
-
-def has_mod_permission(user_roles):
-    """Check if user has admin/executive/ownership permissions"""
-    return ADMIN_ROLE in user_roles or EXECUTIVE_ROLE in user_roles or OWNERSHIP_ROLE in user_roles
+# ==================== MODERATION ====================
 
 async def log_moderation(user_id, action, reason, moderator_id, expires_at=None):
-    """Log moderation action to database"""
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     c.execute("""INSERT INTO moderation (user_id, action, reason, moderator_id, created_at, expires_at)
@@ -530,20 +398,19 @@ async def log_moderation(user_id, action, reason, moderator_id, expires_at=None)
     conn.close()
 
 async def send_mod_log(embed):
-    """Send moderation log to mod log channel"""
     channel = bot.get_channel(MOD_LOG_CHANNEL)
     if channel:
         await channel.send(embed=embed)
 
+def has_mod_permission(user_roles):
+    return ADMIN_ROLE in user_roles or EXECUTIVE_ROLE in user_roles or OWNERSHIP_ROLE in user_roles
+
 @bot.tree.command(name="warn", description="Warn a user")
-@discord.app_commands.describe(
-    user="User to warn",
-    reason="Reason for warning"
-)
-async def warn(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+@discord.app_commands.describe(user="User to warn", reason="Reason")
+async def warn(interaction: discord.Interaction, user: discord.User, reason: str = "No reason"):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     conn = sqlite3.connect('pcodebot.db')
@@ -555,292 +422,168 @@ async def warn(interaction: discord.Interaction, user: discord.User, reason: str
     conn.commit()
     conn.close()
     
-    # Log action
     await log_moderation(str(user.id), "WARN", reason, str(interaction.user.id))
     
-    embed = discord.Embed(
-        title="⚠️ User Warned",
-        description=f"**User:** {user.mention}\n**Reason:** {reason}\n**Warning Count:** {warn_count}",
-        color=0xFFFF00
-    )
-    embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-    embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-    
+    embed = discord.Embed(title="⚠️ User Warned", description=f"**User:** {user.mention}\n**Reason:** {reason}\n**Count:** {warn_count}", color=0xFFFF00)
     await interaction.response.send_message(embed=embed)
     await send_mod_log(embed)
-    
-    try:
-        await user.send(f"⚠️ You have been warned in P Code Studio for: {reason}\n\nWarning Count: {warn_count}")
-    except:
-        pass
 
-@bot.tree.command(name="mute", description="Mute a user (hide messages)")
-@discord.app_commands.describe(
-    user="User to mute",
-    duration="Duration in minutes (default 10)",
-    reason="Reason for mute"
-)
-async def mute_user(interaction: discord.Interaction, user: discord.User, duration: int = 10, reason: str = "No reason provided"):
+@bot.tree.command(name="mute", description="Mute a user")
+@discord.app_commands.describe(user="User to mute", duration="Duration in minutes", reason="Reason")
+async def mute_user(interaction: discord.Interaction, user: discord.User, duration: int = 10, reason: str = "No reason"):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     guild_user = interaction.guild.get_member(user.id)
     if not guild_user:
-        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        await interaction.response.send_message("❌ User not found", ephemeral=True)
         return
     
-    # Create/get muted role
     muted_role = discord.utils.get(interaction.guild.roles, name="Muted")
     if not muted_role:
         muted_role = await interaction.guild.create_role(name="Muted", color=discord.Color.dark_gray())
-        
-        # Set permissions for muted role
         for channel in interaction.guild.channels:
             await channel.set_permissions(muted_role, send_messages=False, speak=False)
     
     await guild_user.add_roles(muted_role)
-    
     unmute_time = datetime.now() + timedelta(minutes=duration)
     mute_tracker[str(user.id)] = unmute_time
     
-    # Log action
     await log_moderation(str(user.id), "MUTE", reason, str(interaction.user.id), unmute_time)
     
-    embed = discord.Embed(
-        title="🔇 User Muted",
-        description=f"**User:** {user.mention}\n**Duration:** {duration} minutes\n**Reason:** {reason}",
-        color=0xFF9900
-    )
-    embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-    embed.add_field(name="Unmute Time", value=f"<t:{int(unmute_time.timestamp())}:f>", inline=False)
-    embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-    
+    embed = discord.Embed(title="🔇 User Muted", description=f"**User:** {user.mention}\n**Duration:** {duration}m\n**Reason:** {reason}", color=0xFF9900)
     await interaction.response.send_message(embed=embed)
     await send_mod_log(embed)
-    
-    try:
-        await user.send(f"🔇 You have been muted in P Code Studio for {duration} minutes.\n**Reason:** {reason}")
-    except:
-        pass
 
 @bot.tree.command(name="unmute", description="Unmute a user")
 @discord.app_commands.describe(user="User to unmute")
 async def unmute_user(interaction: discord.Interaction, user: discord.User):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     guild_user = interaction.guild.get_member(user.id)
     if not guild_user:
-        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        await interaction.response.send_message("❌ User not found", ephemeral=True)
         return
     
     muted_role = discord.utils.get(interaction.guild.roles, name="Muted")
     if muted_role and muted_role in guild_user.roles:
         await guild_user.remove_roles(muted_role)
-        
         if str(user.id) in mute_tracker:
             del mute_tracker[str(user.id)]
         
-        embed = discord.Embed(
-            title="🔊 User Unmuted",
-            description=f"**User:** {user.mention}",
-            color=0x00FF00
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="🔊 User Unmuted", description=f"**User:** {user.mention}", color=0x00FF00)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
-        
-        try:
-            await user.send("🔊 You have been unmuted in P Code Studio.")
-        except:
-            pass
-    else:
-        await interaction.response.send_message("❌ User is not muted.", ephemeral=True)
 
-@bot.tree.command(name="kick", description="Kick a user from the server")
-@discord.app_commands.describe(
-    user="User to kick",
-    reason="Reason for kick"
-)
-async def kick(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+@bot.tree.command(name="kick", description="Kick a user")
+@discord.app_commands.describe(user="User to kick", reason="Reason")
+async def kick(interaction: discord.Interaction, user: discord.User, reason: str = "No reason"):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     try:
         await interaction.guild.kick(user, reason=reason)
-        
-        # Log action
         await log_moderation(str(user.id), "KICK", reason, str(interaction.user.id))
         
-        embed = discord.Embed(
-            title="👢 User Kicked",
-            description=f"**User:** {user.mention}\n**Reason:** {reason}",
-            color=0xFF6600
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="👢 User Kicked", description=f"**User:** {user.mention}\n**Reason:** {reason}", color=0xFF6600)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
-        
-        try:
-            await user.send(f"👢 You have been kicked from P Code Studio.\n**Reason:** {reason}")
-        except:
-            pass
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not kick user: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="ban", description="Ban a user from the server")
-@discord.app_commands.describe(
-    user="User to ban",
-    reason="Reason for ban"
-)
-async def ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+@bot.tree.command(name="ban", description="Ban a user")
+@discord.app_commands.describe(user="User to ban", reason="Reason")
+async def ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason"):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     try:
         await interaction.guild.ban(user, reason=reason)
-        
-        # Log action
         await log_moderation(str(user.id), "BAN", reason, str(interaction.user.id))
         
-        embed = discord.Embed(
-            title="🚫 User Banned",
-            description=f"**User:** {user.mention}\n**Reason:** {reason}",
-            color=0xFF0000
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="🚫 User Banned", description=f"**User:** {user.mention}\n**Reason:** {reason}", color=0xFF0000)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
-        
-        try:
-            await user.send(f"🚫 You have been banned from P Code Studio.\n**Reason:** {reason}")
-        except:
-            pass
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not ban user: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="unban", description="Unban a user from the server")
-@discord.app_commands.describe(
-    user_id="User ID to unban",
-    reason="Reason for unban"
-)
-async def unban(interaction: discord.Interaction, user_id: str, reason: str = "No reason provided"):
+@bot.tree.command(name="unban", description="Unban a user")
+@discord.app_commands.describe(user_id="User ID to unban", reason="Reason")
+async def unban(interaction: discord.Interaction, user_id: str, reason: str = "No reason"):
     user_roles = [role.id for role in interaction.user.roles]
     if OWNERSHIP_ROLE not in user_roles:
-        await interaction.response.send_message("❌ Only owners can unban users.", ephemeral=True)
+        await interaction.response.send_message("❌ Only owners can unban", ephemeral=True)
         return
     
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user, reason=reason)
         
-        embed = discord.Embed(
-            title="✅ User Unbanned",
-            description=f"**User:** {user.mention}\n**Reason:** {reason}",
-            color=0x00FF00
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="✅ User Unbanned", description=f"**User:** {user.mention}\n**Reason:** {reason}", color=0x00FF00)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not unban user: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="promote", description="Promote a user to a higher role")
-@discord.app_commands.describe(
-    user="User to promote",
-    role="Role to assign"
-)
+@bot.tree.command(name="promote", description="Promote a user")
+@discord.app_commands.describe(user="User to promote", role="Role to add")
 async def promote(interaction: discord.Interaction, user: discord.User, role: discord.Role):
     user_roles = [role.id for role in interaction.user.roles]
     if EXECUTIVE_ROLE not in user_roles and OWNERSHIP_ROLE not in user_roles:
-        await interaction.response.send_message("❌ You don't have permission to promote users.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     guild_user = interaction.guild.get_member(user.id)
     if not guild_user:
-        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        await interaction.response.send_message("❌ User not found", ephemeral=True)
         return
     
     try:
         await guild_user.add_roles(role)
         
-        embed = discord.Embed(
-            title="⬆️ User Promoted",
-            description=f"**User:** {user.mention}\n**Role Added:** {role.mention}",
-            color=0x00FF00
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="⬆️ User Promoted", description=f"**User:** {user.mention}\n**Role:** {role.mention}", color=0x00FF00)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
-        
-        try:
-            await user.send(f"⬆️ You have been promoted to {role.name} in P Code Studio!")
-        except:
-            pass
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not promote user: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="demote", description="Demote a user by removing a role")
-@discord.app_commands.describe(
-    user="User to demote",
-    role="Role to remove"
-)
+@bot.tree.command(name="demote", description="Demote a user")
+@discord.app_commands.describe(user="User to demote", role="Role to remove")
 async def demote(interaction: discord.Interaction, user: discord.User, role: discord.Role):
     user_roles = [role.id for role in interaction.user.roles]
     if EXECUTIVE_ROLE not in user_roles and OWNERSHIP_ROLE not in user_roles:
-        await interaction.response.send_message("❌ You don't have permission to demote users.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     guild_user = interaction.guild.get_member(user.id)
     if not guild_user:
-        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        await interaction.response.send_message("❌ User not found", ephemeral=True)
         return
     
     try:
         await guild_user.remove_roles(role)
         
-        embed = discord.Embed(
-            title="⬇️ User Demoted",
-            description=f"**User:** {user.mention}\n**Role Removed:** {role.mention}",
-            color=0xFF0000
-        )
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
-        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
-        
+        embed = discord.Embed(title="⬇️ User Demoted", description=f"**User:** {user.mention}\n**Role Removed:** {role.mention}", color=0xFF0000)
         await interaction.response.send_message(embed=embed)
         await send_mod_log(embed)
-        
-        try:
-            await user.send(f"⬇️ You have been demoted in P Code Studio (role removed: {role.name})")
-        except:
-            pass
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not demote user: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="modinfo", description="View moderation history for a user")
+@bot.tree.command(name="modinfo", description="View moderation history")
 @discord.app_commands.describe(user="User to check")
 async def modinfo(interaction: discord.Interaction, user: discord.User):
     user_roles = [role.id for role in interaction.user.roles]
     if not has_mod_permission(user_roles):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        await interaction.response.send_message("❌ No permission", ephemeral=True)
         return
     
     conn = sqlite3.connect('pcodebot.db')
@@ -850,10 +593,7 @@ async def modinfo(interaction: discord.Interaction, user: discord.User):
     records = c.fetchall()
     conn.close()
     
-    embed = discord.Embed(
-        title=f"📋 Moderation History - {user.name}",
-        color=0x028DEF
-    )
+    embed = discord.Embed(title=f"📋 Moderation History - {user.name}", color=0x028DEF)
     
     if records:
         history = ""
@@ -861,21 +601,15 @@ async def modinfo(interaction: discord.Interaction, user: discord.User):
             history += f"**{action}** - {reason}\n"
         embed.description = history
     else:
-        embed.description = "No moderation records found."
+        embed.description = "No records"
     
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text=f"User ID: {user.id}")
-    
     await interaction.response.send_message(embed=embed)
 
-# ==================== BOT LOG COMMANDS ====================
+# ==================== BOT LOG ====================
 
-@bot.tree.command(name="bot_log", description="Log a bot being developed")
-@discord.app_commands.describe(
-    bot_name="Name of the bot",
-    service="Service used (Github, Render, etc)",
-    link="Link to the bot/project"
-)
+@bot.tree.command(name="bot_log", description="Log a bot")
+@discord.app_commands.describe(bot_name="Bot name", service="Service", link="Link")
 async def bot_log(interaction: discord.Interaction, bot_name: str, service: str, link: str):
     user = interaction.user
     
@@ -885,32 +619,22 @@ async def bot_log(interaction: discord.Interaction, bot_name: str, service: str,
                  VALUES (?, ?, ?, ?, ?, ?, ?)""",
               (str(user.id), bot_name, service, link, "active", datetime.now(), datetime.now()))
     conn.commit()
-    
     log_id = c.lastrowid
     conn.close()
     
     channel = bot.get_channel(BOT_LOG_CHANNEL)
-    embed = discord.Embed(
-        title=f"🤖 New Bot Logged - {bot_name}",
-        description=f"**Developer:** {user.mention}\n**Service:** {service}\n**Link:** [Click here]({link})\n**Status:** Active",
-        color=0x028DEF
-    )
-    embed.set_footer(text=f"Log ID: {log_id} | © P Code Studio")
+    if channel:
+        embed = discord.Embed(title=f"🤖 {bot_name}", description=f"**Dev:** {user.mention}\n**Service:** {service}", color=0x028DEF)
+        await channel.send(embed=embed)
     
-    await channel.send(embed=embed)
-    await interaction.response.send_message(f"✅ Bot logged successfully! ID: {log_id}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Logged! ID: {log_id}", ephemeral=True)
 
-# ==================== BOT HOST COMMANDS ====================
+# ==================== BOT HOST ====================
 
-@bot.tree.command(name="bot_host", description="Host a bot on P Code Bot system")
-@discord.app_commands.describe(
-    bot_name="Name of the bot",
-    bot_token="Bot token (will be stored securely)"
-)
+@bot.tree.command(name="bot_host", description="Host a bot")
+@discord.app_commands.describe(bot_name="Bot name", bot_token="Bot token")
 async def bot_host(interaction: discord.Interaction, bot_name: str, bot_token: str):
     user = interaction.user
-    
-    token_preview = bot_token[:10] + "..." if len(bot_token) > 10 else "***"
     
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
@@ -918,29 +642,15 @@ async def bot_host(interaction: discord.Interaction, bot_name: str, bot_token: s
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
               (str(user.id), bot_name, bot_token, "online", 100.0, datetime.now(), datetime.now(), None))
     conn.commit()
-    
     hosting_id = c.lastrowid
     conn.close()
     
-    embed = discord.Embed(
-        title=f"✅ Bot Hosted Successfully",
-        description=f"**Bot Name:** {bot_name}\n**Token Preview:** {token_preview}\n**Status:** Online\n**Uptime:** 100%",
-        color=0x028DEF
-    )
-    embed.add_field(
-        name="⚠️ Important",
-        value="Your bot is now being monitored. You will receive notifications if:\n• Bot goes offline\n• Service payment reminder\n• Critical issues detected",
-        inline=False
-    )
-    embed.set_footer(text=f"Host ID: {hosting_id} | © P Code Studio")
-    
+    embed = discord.Embed(title="✅ Bot Hosted", description=f"**Bot:** {bot_name}\n**Status:** Online", color=0x028DEF)
     await interaction.response.send_message(embed=embed)
-    await user.send(f"🤖 Your bot **{bot_name}** is now hosted on P Code Bot system and being monitored 24/7!")
 
-# ==================== ECONOMY COMMANDS ====================
+# ==================== ECONOMY ====================
 
 def add_xp(user_id, xp_amount):
-    """Add XP and check for level up"""
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     c.execute("SELECT xp, level FROM economy WHERE user_id = ?", (user_id,))
@@ -966,28 +676,8 @@ def add_xp(user_id, xp_amount):
     
     return level_up, level
 
-def unlock_achievement(user_id, achievement):
-    """Unlock an achievement for a user"""
-    conn = sqlite3.connect('pcodebot.db')
-    c = conn.cursor()
-    c.execute("SELECT achievements FROM economy WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    
-    if result:
-        achievements = json.loads(result[0])
-        if achievement not in achievements:
-            achievements.append(achievement)
-            c.execute("UPDATE economy SET achievements = ? WHERE user_id = ?",
-                      (json.dumps(achievements), user_id))
-            conn.commit()
-            conn.close()
-            return True
-    
-    conn.close()
-    return False
-
-@bot.tree.command(name="balance", description="Check your P Code Studio balance and stats")
-@discord.app_commands.describe(user="User to check (optional)")
+@bot.tree.command(name="balance", description="Check balance")
+@discord.app_commands.describe(user="User (optional)")
 async def balance(interaction: discord.Interaction, user: discord.User = None):
     if user is None:
         user = interaction.user
@@ -1005,51 +695,24 @@ async def balance(interaction: discord.Interaction, user: discord.User = None):
         balance_amt, level, xp, total_earned, achievements, streak = result
     
     achievements = json.loads(achievements)
-    xp_needed = 100 * (level ** 1.5)
-    xp_progress = (xp / xp_needed) * 100 if xp_needed > 0 else 0
+    xp_needed = 100 * (level ** 1.5) if level > 0 else 100
+    xp_progress = (xp / xp_needed * 100) if xp_needed > 0 else 0
     
-    embed = discord.Embed(
-        title=f"💰 {user.name}'s Profile",
-        color=0x028DEF
-    )
-    
-    embed.add_field(
-        name="💵 Currency",
-        value=f"**Balance:** 💵 {balance_amt:.2f}\n**Total Earned:** 💵 {total_earned:.2f}",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📊 Level & Experience",
-        value=f"**Level:** {level}\n**XP:** {xp:.0f}/{xp_needed:.0f} ({xp_progress:.1f}%)",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🔥 Streaks",
-        value=f"**Daily Streak:** {streak} days 🔥",
-        inline=False
-    )
-    
-    if achievements:
-        embed.add_field(
-            name="🏆 Achievements",
-            value=", ".join(achievements),
-            inline=False
-        )
-    
+    embed = discord.Embed(title=f"💰 {user.name}", color=0x028DEF)
+    embed.add_field(name="Balance", value=f"💵 {balance_amt:.2f}", inline=True)
+    embed.add_field(name="Level", value=str(level), inline=True)
+    embed.add_field(name="XP", value=f"{xp:.0f}/{xp_needed:.0f}", inline=True)
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="© P Code Studio | Keep grinding!")
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="daily", description="Claim your daily reward and boost your streak!")
+@bot.tree.command(name="daily", description="Claim daily reward")
 async def daily(interaction: discord.Interaction):
     user = interaction.user
     
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
-    c.execute("SELECT last_daily, balance, streak, last_streak_date FROM economy WHERE user_id = ?", (str(user.id),))
+    c.execute("SELECT last_daily, balance, streak FROM economy WHERE user_id = ?", (str(user.id),))
     result = c.fetchone()
     
     if result is None:
@@ -1058,318 +721,162 @@ async def daily(interaction: discord.Interaction):
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   (str(user.id), 100.0, 1, 0.0, datetime.now(), 100.0, json.dumps([]), 1, datetime.now()))
         conn.commit()
-        await interaction.response.send_message("✅ You claimed your daily 💵100! (First time reward) 🎉")
-    else:
-        last_daily, balance, streak, last_streak_date = result
-        
-        if last_daily:
-            last_daily = datetime.fromisoformat(last_daily)
-            days_since = (datetime.now() - last_daily).days
-            
-            if days_since < 1:
-                hours_left = 24 - (datetime.now() - last_daily).seconds // 3600
-                await interaction.response.send_message(
-                    f"❌ You already claimed your daily reward! Try again in {hours_left} hours.", 
-                    ephemeral=True
-                )
-                conn.close()
-                return
-            
-            if days_since == 1:
-                streak += 1
-            else:
-                streak = 1
-        else:
-            streak = 1
-        
-        base_reward = 100
-        streak_bonus = min(streak * 10, 100)
-        total_reward = base_reward + streak_bonus
-        
-        new_balance = balance + total_reward
-        
-        c.execute("""UPDATE economy 
-                     SET balance = ?, last_daily = ?, total_earned = total_earned + ?, streak = ?, last_streak_date = ?
-                     WHERE user_id = ?""",
-                  (new_balance, datetime.now(), total_reward, streak, datetime.now(), str(user.id)))
-        conn.commit()
-        
-        add_xp(str(user.id), 10)
-        
-        if streak == 7:
-            if unlock_achievement(str(user.id), "🔥 Week Warrior"):
-                await interaction.followup.send("🏆 **Achievement Unlocked:** Week Warrior (7 day streak)!")
-        elif streak == 30:
-            if unlock_achievement(str(user.id), "💪 Monthly Master"):
-                await interaction.followup.send("🏆 **Achievement Unlocked:** Monthly Master (30 day streak)!")
-        
-        embed = discord.Embed(
-            title="✅ Daily Reward Claimed!",
-            description=f"**Base Reward:** 💵{base_reward}\n**Streak Bonus:** 💵{streak_bonus}\n**Total:** 💵{total_reward}",
-            color=0x00FF00
-        )
-        embed.add_field(
-            name="🔥 Streak Information",
-            value=f"**Current Streak:** {streak} days\n**New Balance:** 💵{new_balance:.2f}",
-            inline=False
-        )
-        embed.set_footer(text="Come back tomorrow to continue your streak!")
-        
-        await interaction.response.send_message(embed=embed)
+        conn.close()
+        await interaction.response.send_message("✅ You claimed 💵100!")
+        return
     
+    last_daily, balance, streak = result
+    
+    if last_daily:
+        last_daily = datetime.fromisoformat(last_daily)
+        if (datetime.now() - last_daily).days < 1:
+            await interaction.response.send_message("❌ Already claimed today!", ephemeral=True)
+            conn.close()
+            return
+        streak += 1
+    else:
+        streak = 1
+    
+    reward = 100 + min(streak * 10, 100)
+    new_balance = balance + reward
+    
+    c.execute("UPDATE economy SET balance = ?, last_daily = ?, streak = ? WHERE user_id = ?",
+              (new_balance, datetime.now(), streak, str(user.id)))
+    conn.commit()
     conn.close()
+    
+    add_xp(str(user.id), 10)
+    
+    embed = discord.Embed(title="✅ Daily Claimed", description=f"💵{reward}", color=0x00FF00)
+    await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="transfer", description="Transfer money to another user")
-@discord.app_commands.describe(
-    user="User to transfer to",
-    amount="Amount to transfer"
-)
+@bot.tree.command(name="transfer", description="Transfer money")
+@discord.app_commands.describe(user="User", amount="Amount")
 async def transfer(interaction: discord.Interaction, user: discord.User, amount: float):
     sender = interaction.user
     
-    if amount <= 0:
-        await interaction.response.send_message("❌ Amount must be positive!", ephemeral=True)
-        return
-    
-    if sender.id == user.id:
-        await interaction.response.send_message("❌ You can't transfer to yourself!", ephemeral=True)
+    if amount <= 0 or sender.id == user.id:
+        await interaction.response.send_message("❌ Invalid", ephemeral=True)
         return
     
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
-    
     c.execute("SELECT balance FROM economy WHERE user_id = ?", (str(sender.id),))
-    sender_balance = c.fetchone()
+    result = c.fetchone()
     
-    if sender_balance is None or sender_balance[0] < amount:
-        await interaction.response.send_message("❌ You don't have enough balance!", ephemeral=True)
+    if not result or result[0] < amount:
+        await interaction.response.send_message("❌ Not enough balance!", ephemeral=True)
         conn.close()
         return
     
     c.execute("UPDATE economy SET balance = balance - ? WHERE user_id = ?", (amount, str(sender.id)))
-    
-    c.execute("""INSERT OR IGNORE INTO economy 
-                 (user_id, balance, level, xp, last_daily, total_earned, achievements, streak, last_streak_date)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    c.execute("INSERT OR IGNORE INTO economy (user_id, balance, level, xp, last_daily, total_earned, achievements, streak, last_streak_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
               (str(user.id), 0, 1, 0, None, 0, json.dumps([]), 0, None))
     c.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ?", (amount, str(user.id)))
-    
     conn.commit()
     conn.close()
     
-    add_xp(str(sender.id), 5)
-    
-    embed = discord.Embed(
-        title="✅ Transfer Complete",
-        description=f"**From:** {sender.mention}\n**To:** {user.mention}\n**Amount:** 💵{amount:.2f}",
-        color=0x028DEF
-    )
-    embed.set_footer(text="Both users received XP!")
-    
+    embed = discord.Embed(title="✅ Transferred", description=f"💵{amount:.2f}", color=0x028DEF)
     await interaction.response.send_message(embed=embed)
-    
-    try:
-        await user.send(f"💰 You received 💵{amount:.2f} from {sender.mention}!")
-    except:
-        pass
 
-@bot.tree.command(name="leaderboard", description="View the economy leaderboard")
-@discord.app_commands.describe(
-    category="What to rank by (balance, level, or streak)"
-)
+@bot.tree.command(name="leaderboard", description="View leaderboard")
+@discord.app_commands.describe(category="balance, level, or streak")
 async def leaderboard(interaction: discord.Interaction, category: str = "balance"):
     conn = sqlite3.connect('pcodebot.db')
     c = conn.cursor()
     
     if category == "level":
-        c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY level DESC LIMIT 10")
+        c.execute("SELECT user_id, level FROM economy ORDER BY level DESC LIMIT 10")
     elif category == "streak":
-        c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY streak DESC LIMIT 10")
+        c.execute("SELECT user_id, streak FROM economy ORDER BY streak DESC LIMIT 10")
     else:
-        c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY balance DESC LIMIT 10")
+        c.execute("SELECT user_id, balance FROM economy ORDER BY balance DESC LIMIT 10")
     
     results = c.fetchall()
     conn.close()
     
-    category_names = {"balance": "💵 Richest Members", "level": "📊 Highest Levels", "streak": "🔥 Best Streaks"}
-    
-    embed = discord.Embed(
-        title=f"{category_names.get(category, '💰 Economy Leaderboard')}",
-        color=0x028DEF
-    )
-    
-    leaderboard_text = ""
-    for i, (user_id, balance, level, streak) in enumerate(results, 1):
+    embed = discord.Embed(title="📊 Leaderboard", color=0x028DEF)
+    text = ""
+    for i, result in enumerate(results, 1):
         try:
-            user = await bot.fetch_user(int(user_id))
-            if category == "streak":
-                leaderboard_text += f"{i}. **{user.name}** - 🔥{streak} days\n"
-            elif category == "level":
-                leaderboard_text += f"{i}. **{user.name}** - Level {level}\n"
-            else:
-                leaderboard_text += f"{i}. **{user.name}** - 💵{balance:.2f}\n"
+            user = await bot.fetch_user(int(result[0]))
+            text += f"{i}. {user.name}\n"
         except:
             pass
     
-    embed.description = leaderboard_text if leaderboard_text else "No data yet!"
-    embed.set_footer(text="© P Code Studio | Keep competing!")
-    
+    embed.description = text if text else "No data"
     await interaction.response.send_message(embed=embed)
 
-# ==================== FUN COMMANDS ====================
+# ==================== FUN ====================
 
-@bot.tree.command(name="8ball", description="Ask the magic 8 ball a question")
-@discord.app_commands.describe(question="Your question for the magic 8 ball")
+@bot.tree.command(name="8ball", description="Magic 8 ball")
+@discord.app_commands.describe(question="Your question")
 async def magic_8ball(interaction: discord.Interaction, question: str):
-    responses = [
-        "Yes, definitely!", "No, absolutely not.", "Maybe, ask again later.",
-        "The signs point to yes.", "Don't count on it.", "It is certain.",
-        "Very doubtful.", "Ask again later.", "Outlook good.", "Concentrate and ask again.",
-        "Most likely.", "The stars say no.", "Try again.", "Without a doubt!",
-        "My sources say no.", "Outlook not so good."
-    ]
-    
-    embed = discord.Embed(
-        title="🎱 Magic 8 Ball",
-        description=f"**Question:** {question}\n**Answer:** {random.choice(responses)}",
-        color=0x028DEF
-    )
-    embed.set_footer(text=f"Asked by {interaction.user.name}")
-    
+    responses = ["Yes!", "No!", "Maybe!", "Ask again later!", "Signs point to yes!", "Very doubtful!"]
+    embed = discord.Embed(title="🎱 8 Ball", description=random.choice(responses), color=0x028DEF)
     add_xp(str(interaction.user.id), 1)
-    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="dice", description="Roll a dice")
-@discord.app_commands.describe(sides="Number of sides (default 6)")
+@bot.tree.command(name="dice", description="Roll dice")
+@discord.app_commands.describe(sides="Number of sides")
 async def dice(interaction: discord.Interaction, sides: int = 6):
     if sides < 2:
-        await interaction.response.send_message("❌ Dice must have at least 2 sides!", ephemeral=True)
+        await interaction.response.send_message("❌ Min 2 sides!", ephemeral=True)
         return
     
     roll = random.randint(1, sides)
-    
-    embed = discord.Embed(
-        title="🎲 Dice Roll",
-        description=f"Rolled a **{sides}-sided dice**\n**Result:** {roll}",
-        color=0x028DEF
-    )
-    embed.set_footer(text=f"Rolled by {interaction.user.name}")
-    
+    embed = discord.Embed(title="🎲 Dice", description=f"**Result:** {roll}", color=0x028DEF)
     add_xp(str(interaction.user.id), 1)
-    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="coinflip", description="Flip a coin")
+@bot.tree.command(name="coinflip", description="Flip coin")
 async def coinflip(interaction: discord.Interaction):
     result = random.choice(["Heads", "Tails"])
-    
-    embed = discord.Embed(
-        title="🪙 Coin Flip",
-        description=f"**Result:** {result}",
-        color=0x028DEF
-    )
-    embed.set_footer(text=f"Flipped by {interaction.user.name}")
-    
+    embed = discord.Embed(title="🪙 Coin", description=result, color=0x028DEF)
     add_xp(str(interaction.user.id), 1)
-    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="joke", description="Get a random joke")
+@bot.tree.command(name="joke", description="Random joke")
 async def joke(interaction: discord.Interaction):
-    jokes = [
-        "Why don't scientists trust atoms? Because they make up everything!",
-        "Why did the scarecrow win an award? He was outstanding in his field!",
-        "What do you call a fake noodle? An impasta!",
-        "Why don't eggs tell jokes? They'd crack each other up!",
-        "What do you call a bear with no teeth? A gummy bear!",
-        "Why did the coffee file a police report? It got mugged!",
-        "What's orange and sounds like a parrot? A carrot!",
-        "Why don't skeletons fight each other? They don't have the guts!",
-        "What did the ocean say to the beach? Nothing, it just waved!",
-        "Why don't you ever see elephants hiding in trees? Because they're so good at it!",
-    ]
-    
-    embed = discord.Embed(
-        title="😄 Random Joke",
-        description=random.choice(jokes),
-        color=0x028DEF
-    )
-    embed.set_footer(text=f"For {interaction.user.name}")
-    
+    jokes = ["Why don't scientists trust atoms? Because they make up everything!", "Why did the coffee file a police report? It got mugged!"]
+    embed = discord.Embed(title="😄 Joke", description=random.choice(jokes), color=0x028DEF)
     add_xp(str(interaction.user.id), 1)
-    
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="rps", description="Play Rock Paper Scissors against the bot")
-@discord.app_commands.describe(choice="Your choice (rock, paper, or scissors)")
+@bot.tree.command(name="rps", description="Rock Paper Scissors")
+@discord.app_commands.describe(choice="rock, paper, or scissors")
 async def rps(interaction: discord.Interaction, choice: str):
-    valid_choices = ["rock", "paper", "scissors"]
+    valid = ["rock", "paper", "scissors"]
     choice = choice.lower()
     
-    if choice not in valid_choices:
-        await interaction.response.send_message("❌ Invalid choice! Use: rock, paper, or scissors", ephemeral=True)
+    if choice not in valid:
+        await interaction.response.send_message("❌ Invalid!", ephemeral=True)
         return
     
-    bot_choice = random.choice(valid_choices)
+    bot_choice = random.choice(valid)
     
     if choice == bot_choice:
-        result = "It's a tie! 🤝"
+        result = "Tie! 🤝"
         reward = 10
-    elif (choice == "rock" and bot_choice == "scissors") or \
-         (choice == "paper" and bot_choice == "rock") or \
-         (choice == "scissors" and bot_choice == "paper"):
+    elif (choice == "rock" and bot_choice == "scissors") or (choice == "paper" and bot_choice == "rock") or (choice == "scissors" and bot_choice == "paper"):
         result = "You win! 🎉"
         reward = 50
     else:
         result = "I win! 🤖"
         reward = 10
     
-    embed = discord.Embed(
-        title="🎮 Rock Paper Scissors",
-        description=f"**Your choice:** {choice.capitalize()}\n**My choice:** {bot_choice.capitalize()}\n\n{result}",
-        color=0x028DEF
-    )
+    embed = discord.Embed(title="🎮 RPS", description=f"You: {choice}\nMe: {bot_choice}\n{result}", color=0x028DEF)
     
     if reward > 10:
         conn = sqlite3.connect('pcodebot.db')
         c = conn.cursor()
-        c.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ?", 
-                  (reward, str(interaction.user.id)))
+        c.execute("UPDATE economy SET balance = balance + ? WHERE user_id = ?", (reward, str(interaction.user.id)))
         conn.commit()
         conn.close()
-        
-        embed.add_field(
-            name="💰 Reward",
-            value=f"You earned 💵{reward}!",
-            inline=False
-        )
+        embed.add_field(name="Reward", value=f"💵{reward}", inline=False)
     
     add_xp(str(interaction.user.id), 5)
-    
-    embed.set_footer(text="Thanks for playing!")
     await interaction.response.send_message(embed=embed)
 
-# ==================== GITHUB FEED ====================
-
-@bot.tree.command(name="github_feed", description="Enable GitHub feed notifications")
-@discord.app_commands.describe(
-    repo="GitHub repository (owner/repo format)",
-    events="Events to track (push, pull_request, issues, all)"
-)
-async def github_feed(interaction: discord.Interaction, repo: str, events: str = "all"):
-    embed = discord.Embed(
-        title="📊 GitHub Feed Setup",
-        description=f"**Repository:** {repo}\n**Events Tracked:** {events}\n**Channel:** {interaction.channel.mention}",
-        color=0x028DEF
-    )
-    embed.add_field(
-        name="ℹ️ Info",
-        value="To fully enable GitHub feeds, set up a webhook in your GitHub repository settings pointing to your bot server.",
-        inline=False
-    )
-    
-    await interaction.response.send_message(embed=embed)
-
-# Run the bot
+# Run bot
 bot.run(TOKEN)

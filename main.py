@@ -3,9 +3,10 @@ from discord.ext import commands, tasks
 import os
 from dotenv import load_dotenv
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import random
+from collections import defaultdict
 
 load_dotenv()
 
@@ -23,10 +24,24 @@ WELCOME_CHANNEL = 1514684270596198594
 SUPPORT_CHANNEL = 1514684277764128800
 GITHUB_CHANNEL = 1514684267811180808
 BOT_LOG_CHANNEL = 1514684302502268929
+MOD_LOG_CHANNEL = 1514684302502268929  # Same as bot log or change to your mod log channel
 
-# Role IDs
+# Role IDs - Hierarchy: Owner > Executive Team > Administration Team > Members
+OWNERSHIP_ROLE = 1517219295623516370  # Owner/Founder role
+EXECUTIVE_ROLE = 1517219295623516370  # Executive Team
+ADMIN_ROLE = 1517237018642481252      # Administration Team
 LEADERSHIP_ROLE_1 = 1517219295623516370
 LEADERSHIP_ROLE_2 = 1517222332991668425
+
+# Raid protection settings
+RAID_THRESHOLD = 5  # Join events in 10 seconds = raid
+RAID_TIME_WINDOW = 10  # seconds
+BAN_ON_RAID = True  # Auto-ban on raid detection
+
+# In-memory tracking for raid detection
+join_tracker = defaultdict(list)
+warning_tracker = defaultdict(int)
+mute_tracker = {}
 
 # Database setup
 def init_db():
@@ -43,12 +58,12 @@ def init_db():
                  (id INTEGER PRIMARY KEY, user_id TEXT, bot_name TEXT, bot_token TEXT,
                   status TEXT, uptime REAL, created_at TIMESTAMP, last_check TIMESTAMP, last_alert TIMESTAMP)''')
     
-    # Economy table with achievements
+    # Economy table
     c.execute('''CREATE TABLE IF NOT EXISTS economy
                  (user_id TEXT PRIMARY KEY, balance REAL, level INTEGER, xp REAL, last_daily TIMESTAMP,
                   total_earned REAL, achievements TEXT, streak INTEGER, last_streak_date TIMESTAMP)''')
     
-    # Support tickets table with status tracking
+    # Support tickets table
     c.execute('''CREATE TABLE IF NOT EXISTS support_tickets
                  (id INTEGER PRIMARY KEY, user_id TEXT, claimed_by TEXT, service TEXT, channel_id TEXT, 
                   status TEXT, created_at TIMESTAMP, closed_at TIMESTAMP, close_reason TEXT, rating INTEGER)''')
@@ -56,6 +71,20 @@ def init_db():
     # Ticket messages for tracking
     c.execute('''CREATE TABLE IF NOT EXISTS ticket_messages
                  (id INTEGER PRIMARY KEY, ticket_id INTEGER, message_id TEXT, channel_id TEXT)''')
+    
+    # Moderation table - User infractions
+    c.execute('''CREATE TABLE IF NOT EXISTS moderation
+                 (id INTEGER PRIMARY KEY, user_id TEXT, action TEXT, reason TEXT, 
+                  moderator_id TEXT, created_at TIMESTAMP, expires_at TIMESTAMP, 
+                  is_active INTEGER DEFAULT 1)''')
+    
+    # Warning table
+    c.execute('''CREATE TABLE IF NOT EXISTS warnings
+                 (id INTEGER PRIMARY KEY, user_id TEXT, reason TEXT, moderator_id TEXT, created_at TIMESTAMP)''')
+    
+    # Raid log table
+    c.execute('''CREATE TABLE IF NOT EXISTS raid_logs
+                 (id INTEGER PRIMARY KEY, user_id TEXT, action TEXT, reason TEXT, created_at TIMESTAMP)''')
     
     conn.commit()
     conn.close()
@@ -71,10 +100,30 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(e)
+    
+    # Start background tasks
+    raid_monitor.start()
 
 @bot.event
 async def on_member_join(member):
-    """Send welcome message when member joins"""
+    """Send welcome message when member joins - WITH RAID DETECTION"""
+    # Raid detection
+    current_time = datetime.now()
+    guild_id = str(member.guild.id)
+    
+    # Add this join to tracker
+    join_tracker[guild_id].append(current_time)
+    
+    # Remove old entries outside the time window
+    join_tracker[guild_id] = [t for t in join_tracker[guild_id] 
+                              if (current_time - t).total_seconds() < RAID_TIME_WINDOW]
+    
+    # Check for raid
+    if len(join_tracker[guild_id]) >= RAID_THRESHOLD:
+        await handle_raid(member.guild, member)
+        return
+    
+    # Normal welcome message
     channel = bot.get_channel(WELCOME_CHANNEL)
     
     embed = discord.Embed(
@@ -115,6 +164,38 @@ async def on_member_join(member):
     conn.commit()
     conn.close()
 
+async def handle_raid(guild, member):
+    """Handle raid detection and auto-ban"""
+    raid_channel = bot.get_channel(MOD_LOG_CHANNEL)
+    
+    embed = discord.Embed(
+        title="🚨 RAID DETECTED",
+        description=f"Multiple accounts joining rapidly detected!",
+        color=0xFF0000
+    )
+    embed.add_field(name="Latest Joiner", value=f"{member.mention} ({member.id})", inline=False)
+    embed.add_field(name="Account Age", value=f"Created <t:{int(member.created_at.timestamp())}:R>", inline=False)
+    
+    # Log to database
+    conn = sqlite3.connect('pcodebot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO raid_logs (user_id, action, reason, created_at) VALUES (?, ?, ?, ?)",
+              (str(member.id), "RAID_DETECTED", "Raid event triggered", datetime.now()))
+    conn.commit()
+    conn.close()
+    
+    if BAN_ON_RAID:
+        try:
+            await member.ban(reason="Raid protection - automatic ban")
+            embed.add_field(name="Action Taken", value="✅ User automatically banned", inline=False)
+            c.execute("INSERT INTO raid_logs (user_id, action, reason, created_at) VALUES (?, ?, ?, ?)",
+                      (str(member.id), "AUTO_BAN", "Raid detection auto-ban", datetime.now()))
+        except:
+            embed.add_field(name="Action Taken", value="⚠️ Could not ban user", inline=False)
+    
+    embed.set_footer(text=f"Guild: {guild.name} | {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+    await raid_channel.send(embed=embed)
+
 @bot.event
 async def on_member_remove(member):
     """Send goodbye message when member leaves"""
@@ -129,6 +210,24 @@ async def on_member_remove(member):
     embed.set_footer(text="✨ Code. Design. Create.\n👑 P Code Studio Team")
     
     await channel.send(embed=embed)
+
+@tasks.loop(seconds=30)
+async def raid_monitor():
+    """Background task to monitor raids and expiring mutes"""
+    # Clean old join entries
+    current_time = datetime.now()
+    for guild_id in list(join_tracker.keys()):
+        join_tracker[guild_id] = [t for t in join_tracker[guild_id] 
+                                  if (current_time - t).total_seconds() < RAID_TIME_WINDOW]
+    
+    # Check for expired mutes
+    expired_mutes = []
+    for user_id, unmute_time in mute_tracker.items():
+        if datetime.now() >= unmute_time:
+            expired_mutes.append(user_id)
+    
+    # This would require access to guild/member objects to actually unmute
+    # For now, we just track it - implement per-guild basis
 
 # ==================== SUPPORT PANEL COMMANDS ====================
 
@@ -189,7 +288,6 @@ class TicketButtonView(discord.ui.View):
     
     @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.green, emoji="👋")
     async def claim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has permission (is support role)
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
             await interaction.response.send_message("❌ You don't have permission to claim tickets.", ephemeral=True)
@@ -217,13 +315,11 @@ class TicketButtonView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed)
         
-        # Send notification to ticket creator
         user = await bot.fetch_user(int(self.user_id))
         await user.send(f"📌 Your support ticket has been claimed by {interaction.user.mention}!")
     
     @discord.ui.button(label="Unclaim Ticket", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def unclaim_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has permission
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
             await interaction.response.send_message("❌ You don't have permission to unclaim tickets.", ephemeral=True)
@@ -252,7 +348,6 @@ class TicketButtonView(discord.ui.View):
     
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, emoji="🔒")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has permission
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
             await interaction.response.send_message("❌ You don't have permission to close tickets.", ephemeral=True)
@@ -262,7 +357,6 @@ class TicketButtonView(discord.ui.View):
     
     @discord.ui.button(label="Close With Reason", style=discord.ButtonStyle.danger, emoji="📝")
     async def close_with_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if user has permission
         user_roles = [role.id for role in interaction.user.roles]
         if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
             await interaction.response.send_message("❌ You don't have permission to close tickets.", ephemeral=True)
@@ -288,7 +382,6 @@ class ServiceSelect(discord.ui.Select):
         service = self.values[0]
         user = interaction.user
         
-        # Service configurations
         services = {
             "leadership": {
                 "name": "👑 Leadership Support",
@@ -334,7 +427,6 @@ class ServiceSelect(discord.ui.Select):
         
         service_info = services[service]
         
-        # Create ticket channel
         guild = interaction.guild
         channel = await guild.create_text_channel(
             name=f"ticket-{user.name}",
@@ -345,13 +437,11 @@ class ServiceSelect(discord.ui.Select):
             }
         )
         
-        # Add support roles to see the ticket
         for role_id in service_info["roles"]:
             role = guild.get_role(role_id)
             if role:
                 await channel.set_permissions(role, view_channel=True, send_messages=True)
         
-        # Store ticket in database first
         conn = sqlite3.connect('pcodebot.db')
         c = conn.cursor()
         c.execute("""INSERT INTO support_tickets 
@@ -363,7 +453,6 @@ class ServiceSelect(discord.ui.Select):
         ticket_id = c.lastrowid
         conn.close()
         
-        # Send ticket message with buttons
         embed = discord.Embed(
             title=f"New {service_info['name']} Ticket",
             description=service_info["message"],
@@ -376,13 +465,10 @@ class ServiceSelect(discord.ui.Select):
         )
         embed.set_footer(text="© P Code Studio | All Rights Reserved")
         
-        # Mention support roles
         mention_text = " ".join([f"<@&{role_id}>" for role_id in service_info["roles"]])
         
-        # Send message with buttons
         message = await channel.send(mention_text, embed=embed, view=TicketButtonView(ticket_id, str(user.id)))
         
-        # Store message ID
         conn = sqlite3.connect('pcodebot.db')
         c = conn.cursor()
         c.execute("INSERT INTO ticket_messages (ticket_id, message_id, channel_id) VALUES (?, ?, ?)",
@@ -400,7 +486,6 @@ class ServiceView(discord.ui.View):
 @bot.tree.command(name="assistance", description="Get support from P Code Studio")
 @discord.app_commands.describe(panel="Open the support panel")
 async def assistance_panel(interaction: discord.Interaction, panel: str = "panel"):
-    # Check if user has required roles
     user_roles = [role.id for role in interaction.user.roles]
     if LEADERSHIP_ROLE_1 not in user_roles and LEADERSHIP_ROLE_2 not in user_roles:
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
@@ -428,6 +513,361 @@ async def assistance_panel(interaction: discord.Interaction, panel: str = "panel
     
     await interaction.response.send_message(embed=embed, view=ServiceView())
 
+# ==================== MODERATION COMMANDS ====================
+
+def has_mod_permission(user_roles):
+    """Check if user has admin/executive/ownership permissions"""
+    return ADMIN_ROLE in user_roles or EXECUTIVE_ROLE in user_roles or OWNERSHIP_ROLE in user_roles
+
+async def log_moderation(user_id, action, reason, moderator_id, expires_at=None):
+    """Log moderation action to database"""
+    conn = sqlite3.connect('pcodebot.db')
+    c = conn.cursor()
+    c.execute("""INSERT INTO moderation (user_id, action, reason, moderator_id, created_at, expires_at)
+                 VALUES (?, ?, ?, ?, ?, ?)""",
+              (user_id, action, reason, moderator_id, datetime.now(), expires_at))
+    conn.commit()
+    conn.close()
+
+async def send_mod_log(embed):
+    """Send moderation log to mod log channel"""
+    channel = bot.get_channel(MOD_LOG_CHANNEL)
+    if channel:
+        await channel.send(embed=embed)
+
+@bot.tree.command(name="warn", description="Warn a user")
+@discord.app_commands.describe(
+    user="User to warn",
+    reason="Reason for warning"
+)
+async def warn(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    conn = sqlite3.connect('pcodebot.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO warnings (user_id, reason, moderator_id, created_at) VALUES (?, ?, ?, ?)",
+              (str(user.id), reason, str(interaction.user.id), datetime.now()))
+    c.execute("SELECT COUNT(*) FROM warnings WHERE user_id = ?", (str(user.id),))
+    warn_count = c.fetchone()[0]
+    conn.commit()
+    conn.close()
+    
+    # Log action
+    await log_moderation(str(user.id), "WARN", reason, str(interaction.user.id))
+    
+    embed = discord.Embed(
+        title="⚠️ User Warned",
+        description=f"**User:** {user.mention}\n**Reason:** {reason}\n**Warning Count:** {warn_count}",
+        color=0xFFFF00
+    )
+    embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+    embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+    
+    await interaction.response.send_message(embed=embed)
+    await send_mod_log(embed)
+    
+    try:
+        await user.send(f"⚠️ You have been warned in P Code Studio for: {reason}\n\nWarning Count: {warn_count}")
+    except:
+        pass
+
+@bot.tree.command(name="mute", description="Mute a user (hide messages)")
+@discord.app_commands.describe(
+    user="User to mute",
+    duration="Duration in minutes (default 10)",
+    reason="Reason for mute"
+)
+async def mute_user(interaction: discord.Interaction, user: discord.User, duration: int = 10, reason: str = "No reason provided"):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    guild_user = interaction.guild.get_member(user.id)
+    if not guild_user:
+        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        return
+    
+    # Create/get muted role
+    muted_role = discord.utils.get(interaction.guild.roles, name="Muted")
+    if not muted_role:
+        muted_role = await interaction.guild.create_role(name="Muted", color=discord.Color.dark_gray())
+        
+        # Set permissions for muted role
+        for channel in interaction.guild.channels:
+            await channel.set_permissions(muted_role, send_messages=False, speak=False)
+    
+    await guild_user.add_roles(muted_role)
+    
+    unmute_time = datetime.now() + timedelta(minutes=duration)
+    mute_tracker[str(user.id)] = unmute_time
+    
+    # Log action
+    await log_moderation(str(user.id), "MUTE", reason, str(interaction.user.id), unmute_time)
+    
+    embed = discord.Embed(
+        title="🔇 User Muted",
+        description=f"**User:** {user.mention}\n**Duration:** {duration} minutes\n**Reason:** {reason}",
+        color=0xFF9900
+    )
+    embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+    embed.add_field(name="Unmute Time", value=f"<t:{int(unmute_time.timestamp())}:f>", inline=False)
+    embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+    
+    await interaction.response.send_message(embed=embed)
+    await send_mod_log(embed)
+    
+    try:
+        await user.send(f"🔇 You have been muted in P Code Studio for {duration} minutes.\n**Reason:** {reason}")
+    except:
+        pass
+
+@bot.tree.command(name="unmute", description="Unmute a user")
+@discord.app_commands.describe(user="User to unmute")
+async def unmute_user(interaction: discord.Interaction, user: discord.User):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    guild_user = interaction.guild.get_member(user.id)
+    if not guild_user:
+        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        return
+    
+    muted_role = discord.utils.get(interaction.guild.roles, name="Muted")
+    if muted_role and muted_role in guild_user.roles:
+        await guild_user.remove_roles(muted_role)
+        
+        if str(user.id) in mute_tracker:
+            del mute_tracker[str(user.id)]
+        
+        embed = discord.Embed(
+            title="🔊 User Unmuted",
+            description=f"**User:** {user.mention}",
+            color=0x00FF00
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+        
+        try:
+            await user.send("🔊 You have been unmuted in P Code Studio.")
+        except:
+            pass
+    else:
+        await interaction.response.send_message("❌ User is not muted.", ephemeral=True)
+
+@bot.tree.command(name="kick", description="Kick a user from the server")
+@discord.app_commands.describe(
+    user="User to kick",
+    reason="Reason for kick"
+)
+async def kick(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    try:
+        await interaction.guild.kick(user, reason=reason)
+        
+        # Log action
+        await log_moderation(str(user.id), "KICK", reason, str(interaction.user.id))
+        
+        embed = discord.Embed(
+            title="👢 User Kicked",
+            description=f"**User:** {user.mention}\n**Reason:** {reason}",
+            color=0xFF6600
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+        
+        try:
+            await user.send(f"👢 You have been kicked from P Code Studio.\n**Reason:** {reason}")
+        except:
+            pass
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not kick user: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="ban", description="Ban a user from the server")
+@discord.app_commands.describe(
+    user="User to ban",
+    reason="Reason for ban"
+)
+async def ban(interaction: discord.Interaction, user: discord.User, reason: str = "No reason provided"):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    try:
+        await interaction.guild.ban(user, reason=reason)
+        
+        # Log action
+        await log_moderation(str(user.id), "BAN", reason, str(interaction.user.id))
+        
+        embed = discord.Embed(
+            title="🚫 User Banned",
+            description=f"**User:** {user.mention}\n**Reason:** {reason}",
+            color=0xFF0000
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+        
+        try:
+            await user.send(f"🚫 You have been banned from P Code Studio.\n**Reason:** {reason}")
+        except:
+            pass
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not ban user: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="unban", description="Unban a user from the server")
+@discord.app_commands.describe(
+    user_id="User ID to unban",
+    reason="Reason for unban"
+)
+async def unban(interaction: discord.Interaction, user_id: str, reason: str = "No reason provided"):
+    user_roles = [role.id for role in interaction.user.roles]
+    if OWNERSHIP_ROLE not in user_roles:
+        await interaction.response.send_message("❌ Only owners can unban users.", ephemeral=True)
+        return
+    
+    try:
+        user = await bot.fetch_user(int(user_id))
+        await interaction.guild.unban(user, reason=reason)
+        
+        embed = discord.Embed(
+            title="✅ User Unbanned",
+            description=f"**User:** {user.mention}\n**Reason:** {reason}",
+            color=0x00FF00
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not unban user: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="promote", description="Promote a user to a higher role")
+@discord.app_commands.describe(
+    user="User to promote",
+    role="Role to assign"
+)
+async def promote(interaction: discord.Interaction, user: discord.User, role: discord.Role):
+    user_roles = [role.id for role in interaction.user.roles]
+    if EXECUTIVE_ROLE not in user_roles and OWNERSHIP_ROLE not in user_roles:
+        await interaction.response.send_message("❌ You don't have permission to promote users.", ephemeral=True)
+        return
+    
+    guild_user = interaction.guild.get_member(user.id)
+    if not guild_user:
+        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        return
+    
+    try:
+        await guild_user.add_roles(role)
+        
+        embed = discord.Embed(
+            title="⬆️ User Promoted",
+            description=f"**User:** {user.mention}\n**Role Added:** {role.mention}",
+            color=0x00FF00
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+        
+        try:
+            await user.send(f"⬆️ You have been promoted to {role.name} in P Code Studio!")
+        except:
+            pass
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not promote user: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="demote", description="Demote a user by removing a role")
+@discord.app_commands.describe(
+    user="User to demote",
+    role="Role to remove"
+)
+async def demote(interaction: discord.Interaction, user: discord.User, role: discord.Role):
+    user_roles = [role.id for role in interaction.user.roles]
+    if EXECUTIVE_ROLE not in user_roles and OWNERSHIP_ROLE not in user_roles:
+        await interaction.response.send_message("❌ You don't have permission to demote users.", ephemeral=True)
+        return
+    
+    guild_user = interaction.guild.get_member(user.id)
+    if not guild_user:
+        await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
+        return
+    
+    try:
+        await guild_user.remove_roles(role)
+        
+        embed = discord.Embed(
+            title="⬇️ User Demoted",
+            description=f"**User:** {user.mention}\n**Role Removed:** {role.mention}",
+            color=0xFF0000
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=False)
+        embed.set_footer(text=f"Timestamp: {datetime.now().strftime('%m/%d/%Y %H:%M:%S')}")
+        
+        await interaction.response.send_message(embed=embed)
+        await send_mod_log(embed)
+        
+        try:
+            await user.send(f"⬇️ You have been demoted in P Code Studio (role removed: {role.name})")
+        except:
+            pass
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not demote user: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="modinfo", description="View moderation history for a user")
+@discord.app_commands.describe(user="User to check")
+async def modinfo(interaction: discord.Interaction, user: discord.User):
+    user_roles = [role.id for role in interaction.user.roles]
+    if not has_mod_permission(user_roles):
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        return
+    
+    conn = sqlite3.connect('pcodebot.db')
+    c = conn.cursor()
+    c.execute("SELECT action, reason, moderator_id, created_at FROM moderation WHERE user_id = ? ORDER BY created_at DESC LIMIT 10",
+              (str(user.id),))
+    records = c.fetchall()
+    conn.close()
+    
+    embed = discord.Embed(
+        title=f"📋 Moderation History - {user.name}",
+        color=0x028DEF
+    )
+    
+    if records:
+        history = ""
+        for action, reason, moderator_id, created_at in records:
+            history += f"**{action}** - {reason}\n"
+        embed.description = history
+    else:
+        embed.description = "No moderation records found."
+    
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text=f"User ID: {user.id}")
+    
+    await interaction.response.send_message(embed=embed)
+
 # ==================== BOT LOG COMMANDS ====================
 
 @bot.tree.command(name="bot_log", description="Log a bot being developed")
@@ -449,7 +889,6 @@ async def bot_log(interaction: discord.Interaction, bot_name: str, service: str,
     log_id = c.lastrowid
     conn.close()
     
-    # Send to bot log channel
     channel = bot.get_channel(BOT_LOG_CHANNEL)
     embed = discord.Embed(
         title=f"🤖 New Bot Logged - {bot_name}",
@@ -471,7 +910,6 @@ async def bot_log(interaction: discord.Interaction, bot_name: str, service: str,
 async def bot_host(interaction: discord.Interaction, bot_name: str, bot_token: str):
     user = interaction.user
     
-    # Don't display the token in responses for security
     token_preview = bot_token[:10] + "..." if len(bot_token) > 10 else "***"
     
     conn = sqlite3.connect('pcodebot.db')
@@ -568,7 +1006,7 @@ async def balance(interaction: discord.Interaction, user: discord.User = None):
     
     achievements = json.loads(achievements)
     xp_needed = 100 * (level ** 1.5)
-    xp_progress = (xp / xp_needed) * 100
+    xp_progress = (xp / xp_needed) * 100 if xp_needed > 0 else 0
     
     embed = discord.Embed(
         title=f"💰 {user.name}'s Profile",
@@ -637,7 +1075,6 @@ async def daily(interaction: discord.Interaction):
                 conn.close()
                 return
             
-            # Check if streak should continue
             if days_since == 1:
                 streak += 1
             else:
@@ -645,9 +1082,8 @@ async def daily(interaction: discord.Interaction):
         else:
             streak = 1
         
-        # Bonus reward based on streak
         base_reward = 100
-        streak_bonus = min(streak * 10, 100)  # Max 100 bonus
+        streak_bonus = min(streak * 10, 100)
         total_reward = base_reward + streak_bonus
         
         new_balance = balance + total_reward
@@ -658,10 +1094,8 @@ async def daily(interaction: discord.Interaction):
                   (new_balance, datetime.now(), total_reward, streak, datetime.now(), str(user.id)))
         conn.commit()
         
-        # Add XP
         add_xp(str(user.id), 10)
         
-        # Check for achievements
         if streak == 7:
             if unlock_achievement(str(user.id), "🔥 Week Warrior"):
                 await interaction.followup.send("🏆 **Achievement Unlocked:** Week Warrior (7 day streak)!")
@@ -712,10 +1146,8 @@ async def transfer(interaction: discord.Interaction, user: discord.User, amount:
         conn.close()
         return
     
-    # Update sender
     c.execute("UPDATE economy SET balance = balance - ? WHERE user_id = ?", (amount, str(sender.id)))
     
-    # Update receiver
     c.execute("""INSERT OR IGNORE INTO economy 
                  (user_id, balance, level, xp, last_daily, total_earned, achievements, streak, last_streak_date)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -725,7 +1157,6 @@ async def transfer(interaction: discord.Interaction, user: discord.User, amount:
     conn.commit()
     conn.close()
     
-    # Add XP
     add_xp(str(sender.id), 5)
     
     embed = discord.Embed(
@@ -737,7 +1168,6 @@ async def transfer(interaction: discord.Interaction, user: discord.User, amount:
     
     await interaction.response.send_message(embed=embed)
     
-    # Notify receiver
     try:
         await user.send(f"💰 You received 💵{amount:.2f} from {sender.mention}!")
     except:
@@ -755,7 +1185,7 @@ async def leaderboard(interaction: discord.Interaction, category: str = "balance
         c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY level DESC LIMIT 10")
     elif category == "streak":
         c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY streak DESC LIMIT 10")
-    else:  # balance
+    else:
         c.execute("SELECT user_id, balance, level, streak FROM economy ORDER BY balance DESC LIMIT 10")
     
     results = c.fetchall()
@@ -806,7 +1236,6 @@ async def magic_8ball(interaction: discord.Interaction, question: str):
     )
     embed.set_footer(text=f"Asked by {interaction.user.name}")
     
-    # Add XP for fun
     add_xp(str(interaction.user.id), 1)
     
     await interaction.response.send_message(embed=embed)
@@ -827,7 +1256,6 @@ async def dice(interaction: discord.Interaction, sides: int = 6):
     )
     embed.set_footer(text=f"Rolled by {interaction.user.name}")
     
-    # Add XP
     add_xp(str(interaction.user.id), 1)
     
     await interaction.response.send_message(embed=embed)
@@ -843,7 +1271,6 @@ async def coinflip(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"Flipped by {interaction.user.name}")
     
-    # Add XP
     add_xp(str(interaction.user.id), 1)
     
     await interaction.response.send_message(embed=embed)
@@ -870,7 +1297,6 @@ async def joke(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"For {interaction.user.name}")
     
-    # Add XP
     add_xp(str(interaction.user.id), 1)
     
     await interaction.response.send_message(embed=embed)
@@ -887,7 +1313,6 @@ async def rps(interaction: discord.Interaction, choice: str):
     
     bot_choice = random.choice(valid_choices)
     
-    # Determine winner
     if choice == bot_choice:
         result = "It's a tie! 🤝"
         reward = 10
@@ -906,7 +1331,6 @@ async def rps(interaction: discord.Interaction, choice: str):
         color=0x028DEF
     )
     
-    # Add reward and XP
     if reward > 10:
         conn = sqlite3.connect('pcodebot.db')
         c = conn.cursor()
